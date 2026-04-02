@@ -187,6 +187,9 @@ td{padding:10px 14px;border-bottom:1px solid #0a1525;vertical-align:middle}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @keyframes slideUp{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}
+.content { display: flex; flex-direction: column; }
+footer { margin-top: auto; }
+
 @keyframes slideUpToast{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
 
 /* ═══════════════════════════════════════════════════════
@@ -485,7 +488,7 @@ const MODULES = [
   {id:"dashboard",  icon:"📊", name:"Dashboard",              desc:"At-a-glance stats, alerts, and recent activity",  color:"#6366f1"},
   {id:"intake",     icon:"📋", name:"Intake",                 desc:"Manage referrals, add new clients, track status",  color:"#22c55e"},
   {id:"assessment", icon:"🧪", name:"Initial Assessments",    desc:"Vineland, SRS-2, IEP and assessment tracking",     color:"#f59e0b"},
-  {id:"operations", icon:"📈", name:"Operational Insights",  desc:"Charts, trends, and operational performance",       color:"#fb923c"},
+  {id:"operations", icon:"📈", name:"Operational Insights",  desc:"Aging reports, volume, conversion rates, and team performance",       color:"#fb923c"},
   {id:"about",      icon:"ℹ️", name:"About",                  desc:"Office locations, version history, portal info",   color:"#8b5cf6"},
 ];
 
@@ -555,7 +558,12 @@ async function load(){
     S.error=null;
   } catch(e){
     console.error("Load error:", e);
-    S.error="Database error: "+e.message;
+    // "Failed to fetch" usually means CORS or network — only show if not that
+    if(e.message&&e.message.includes("fetch")){
+      S.error="Could not reach database. Open the portal from GitHub Pages, not a preview.";
+    } else {
+      S.error="Database error: "+e.message;
+    }
   }
   finally{ S.loading=false; go(); }
 }
@@ -749,7 +757,7 @@ function renderHome(){
 
 function enterModule(id){
   S.module=id; S.screen="module";
-  const defaults={dashboard:"overview",intake:"intakedash",assessment:"tracker",operations:"overview",about:"locations"};
+  const defaults={dashboard:"overview",intake:"intakedash",assessment:"tracker",operations:"pipeline",about:"portal"};
   S.subpage=defaults[id]||"overview";
   if(id==="assessment" && S.assessData.length===0) loadAssessments();
   else go();
@@ -787,13 +795,14 @@ function renderModule(){
       {id:"readysvc",    icon:"⭐", label:"Ready for Services"},
     ],
     operations: [
-      {id:"overview",   icon:"📈", label:"Overview"},
-      {id:"staff",      icon:"👤", label:"By Staff Member"},
-      {id:"office",     icon:"🏢", label:"By Office"},
-      {id:"trends",     icon:"📅", label:"Monthly Trends"},
-      {id:"insurance",  icon:"🛡️", label:"Insurance Breakdown"},
+      {id:"pipeline",     icon:"🔄", label:"Pipeline Overview"},
+      {id:"aging",        icon:"⏱️", label:"Referral Aging"},
+      {id:"volume",       icon:"🏢", label:"Clinic Volume"},
+      {id:"conversion",   icon:"📊", label:"Conversion Rate"},
+      {id:"performance",  icon:"⭐", label:"Intake Performance"},
     ],
     about: [
+      {id:"portal",     icon:"ℹ️",  label:"About the Portal"},
       {id:"locations",  icon:"📍", label:"Office Locations"},
     ],
   };
@@ -844,9 +853,12 @@ function renderModule(){
           ${S.error?`<div class="error-bar">⚠️ ${S.error}<button class="x-btn" onclick="S.error=null;go()">✕</button></div>`:""}
           ${renderPage(active,nr,pending,noIns)}
         </div>
+        <footer style="border-top:1px solid var(--border);padding:14px 28px;text-align:center;flex-shrink:0">
+          <span style="font-size:11px;color:var(--dim)">© 2026 Behavioral Solutions of Mississippi &nbsp;•&nbsp; Internal portal developed by Zanteria Wells</span>
+        </footer>
       </div>
     </div>
-    ${S.sel?renderModal():""}`;
+    \${S.sel?renderModal():""}`;
 }
 
 function renderPage(active,nr,pending,noIns){
@@ -871,13 +883,14 @@ function renderPage(active,nr,pending,noIns){
     if(sub==="readysvc")   return renderReadyForServices(src);
   }
   if(mod==="operations"){
-    if(sub==="overview")  return renderOpsOverview(active);
-    if(sub==="staff")     return renderByStaff(active);
-    if(sub==="office")    return renderByOffice(active);
-    if(sub==="trends")    return renderTrends(active);
-    if(sub==="insurance") return renderInsurance(active);
+    if(sub==="pipeline")    return renderOpsPipeline(active,nr);
+    if(sub==="aging")       return renderReferralAging(active);
+    if(sub==="volume")      return renderClinicVolume(active,nr);
+    if(sub==="conversion")  return renderConversionRate(active,nr);
+    if(sub==="performance") return renderIntakePerformance(active);
   }
   if(mod==="about"){
+    if(sub==="portal")    return renderAboutPortal();
     if(sub==="locations") return renderLocations();
   }
   // Fallback — unknown route
@@ -1803,116 +1816,664 @@ function renderReadyForServices(src){
 }
 
 // ══════════════════════════════════════
-// OPERATIONS & INSIGHTS
+// OPERATIONAL INSIGHTS
 // ══════════════════════════════════════
-function barChart(items,color="#6366f1"){
-  const max=Math.max(...items.map(i=>i.v),1);
-  return `<div class="bar-chart">${items.map(i=>`
-    <div class="bar-row">
-      <span class="bar-label">${i.l}</span>
-      <div class="bar-track">
-        <div class="bar-fill" style="width:${Math.round(i.v/max*100)}%;background:${i.color||color}">
-          <span class="bar-val">${i.v}</span>
-        </div>
-      </div>
-    </div>`).join("")}</div>`;
+
+// ── Shared helpers ──
+function daysSince(dateStr){
+  if(!dateStr) return null;
+  const d = new Date(dateStr);
+  if(isNaN(d)) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
 }
 
-function renderOpsOverview(active){
-  const byOffice=OFFICES.map(o=>{const v=active.filter(r=>normalizeOffice(r.office)===o).length;return{l:o,v};});
-  const byStaff=STAFF.filter(s=>s!=="Other").map(s=>{const v=active.filter(r=>r.intake_personnel===s).length;return{l:s,v};}).filter(x=>x.v>0);
-  const paperwork=[
-    {l:"Signed",v:active.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("signed")).length,color:"#22c55e"},
-    {l:"Emailed via Adobe",v:active.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("emailed")).length,color:"#f59e0b"},
-    {l:"Please Send",v:active.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("please")).length,color:"#ef4444"},
-    {l:"Awaiting",v:active.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("awaiting")).length,color:"#fb923c"},
-  ].filter(x=>x.v>0);
+function daysBetween(startStr, endStr){
+  if(!startStr||!endStr) return null;
+  const s = new Date(startStr), e = new Date(endStr);
+  if(isNaN(s)||isNaN(e)) return null;
+  return Math.max(0, Math.floor((e-s)/86400000));
+}
+
+function ageBadge(days, warn=14, danger=30){
+  if(days===null) return `<span style="color:var(--dim);font-size:12px">--</span>`;
+  const c = days>=danger?"#ef4444":days>=warn?"#f59e0b":"#22c55e";
+  return `<span class="bdg" style="background:${c}20;color:${c};border:1px solid ${c}35">${days}d</span>`;
+}
+
+function miniBar(val, max, color="#6366f1"){
+  const pct = max>0?Math.min(100,Math.round(val/max*100)):0;
+  return `<div style="display:flex;align-items:center;gap:8px">
+    <div style="flex:1;background:var(--surface2);border-radius:3px;height:6px;min-width:60px">
+      <div style="width:${pct}%;height:6px;border-radius:3px;background:${color};transition:width 0.5s"></div>
+    </div>
+    <span style="font-size:11px;font-family:'DM Mono',monospace;color:var(--muted);min-width:24px">${val}</span>
+  </div>`;
+}
+
+function statCard(num, label, color, sub=""){
+  return `<div class="stat-box">
+    <div class="stat-num" style="color:${color}">${num}</div>
+    <div class="stat-label">${label}</div>
+    ${sub?`<div class="stat-sub">${sub}</div>`:""}
+  </div>`;
+}
+
+// ══════════════════════════════════════
+// PIPELINE OVERVIEW
+// ══════════════════════════════════════
+function renderOpsPipeline(active,nr){
+  const stageOrder=["New Referral","Intake","Initial Assessment","PA Submitted","PA In Review","PA Approved","Active Client","Reauth Needed","Discharged"];
+  const byStage={};
+  active.forEach(r=>{ const s=r.current_stage||"New Referral"; byStage[s]=(byStage[s]||0)+1; });
+  const maxVal = Math.max(...Object.values(byStage),1);
+
+  const byStaff={};
+  active.forEach(r=>{ if(r.intake_personnel){ byStaff[r.intake_personnel]=(byStaff[r.intake_personnel]||0)+1; } });
+
+  const byIns={};
+  active.forEach(r=>{ if(r.insurance){ byIns[r.insurance]=(byIns[r.insurance]||0)+1; }});
+  const insMax=Math.max(...Object.values(byIns),1);
+
   return `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
-      <div class="card card-pad"><div class="chart-title">Referrals by Office</div>${barChart(byOffice,"#6366f1")}</div>
-      <div class="card card-pad"><div class="chart-title">Referrals by Staff Member</div>${barChart(byStaff,"#22c55e")}</div>
-      <div class="card card-pad" style="grid-column:1/-1"><div class="chart-title">Paperwork Status Breakdown</div>${barChart(paperwork)}</div>
+    <div style="margin-bottom:22px">
+      <div style="font-weight:800;font-size:18px;letter-spacing:-0.01em">Pipeline Overview</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:4px">Full view of where every referral sits in the intake pipeline</div>
+    </div>
+
+    <div class="stats-row stats-4" style="margin-bottom:24px">
+      ${statCard(active.length,"Active Referrals","#6366f1")}
+      ${statCard(active.filter(r=>r.current_stage==="Active Client").length,"Active Clients","#22c55e","receiving services")}
+      ${statCard(active.filter(r=>["PA Submitted","PA In Review"].includes(r.current_stage)).length,"Awaiting PA","#f59e0b","submitted to insurance")}
+      ${statCard(nr.length,"Non-Responsive","#ef4444","or referred out")}
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
+      <div class="card card-pad">
+        <div style="font-size:13px;font-weight:700;margin-bottom:16px">📊 Stage Distribution</div>
+        ${stageOrder.map(s=>{
+          const count=byStage[s]||0;
+          if(!count) return "";
+          return `<div style="margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+              ${stagePill(s)}
+              <span style="font-size:12px;font-weight:700;color:var(--muted);font-family:'DM Mono',monospace">${count} referral${count!==1?"s":""}</span>
+            </div>
+            ${miniBar(count,maxVal)}
+          </div>`;
+        }).join("")}
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div class="card card-pad">
+          <div style="font-size:13px;font-weight:700;margin-bottom:14px">👤 By Staff Member</div>
+          ${Object.entries(byStaff).sort((a,b)=>b[1]-a[1]).map(([s,c])=>`
+            <div style="margin-bottom:10px">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:13px;font-weight:600">${s}</span>
+                <span style="font-size:12px;color:var(--muted)">${c}</span>
+              </div>
+              ${miniBar(c,Math.max(...Object.values(byStaff),1),"#22c55e")}
+            </div>`).join("")}
+        </div>
+        <div class="card card-pad">
+          <div style="font-size:13px;font-weight:700;margin-bottom:14px">🛡️ Insurance Mix</div>
+          ${Object.entries(byIns).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([ins,c])=>`
+            <div style="margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+                <span style="font-size:12px;color:var(--muted)">${ins}</span>
+                <span style="font-size:11px;color:var(--dim)">${c}</span>
+              </div>
+              ${miniBar(c,insMax,"#8b5cf6")}
+            </div>`).join("")}
+        </div>
+      </div>
     </div>`;
 }
 
-function renderByStaff(active){
-  return `<div style="display:flex;flex-direction:column;gap:16px">
-    ${STAFF.filter(s=>s!=="Other").map(s=>{
-      const clients=active.filter(r=>r.intake_personnel===s);
-      if(!clients.length) return "";
-      const signed=clients.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("signed")).length;
-      return `<div class="card card-pad">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-          <div style="font-weight:700;font-size:15px">${s}</div>
-          <div style="display:flex;gap:8px">
-            <span class="bdg" style="background:#6366f120;color:#a5b4fc;border:1px solid #6366f130">${clients.length} clients</span>
-            <span class="bdg" style="background:#22c55e20;color:#22c55e;border:1px solid #22c55e30">${signed} signed</span>
-          </div>
-        </div>
-        <div class="bar-chart">
-          ${[["Signed","#22c55e"],["Pending","#f59e0b"],["Non-Responsive","#ef4444"]].map(([l,c])=>{
-            const count=l==="Signed"?signed:l==="Pending"?clients.filter(r=>!["signed","completed"].includes((r.intake_paperwork||"").toLowerCase())).length:0;
-            return `<div class="bar-row"><span class="bar-label">${l}</span><div class="bar-track"><div class="bar-fill" style="width:${clients.length?Math.round(count/clients.length*100):0}%;background:${c}"><span class="bar-val">${count}</span></div></div></div>`;
-          }).join("")}
-        </div>
-      </div>`;
-    }).join("")}
-  </div>`;
-}
+// ══════════════════════════════════════
+// REFERRAL AGING
+// ══════════════════════════════════════
+function renderReferralAging(active){
+  const WARN=14, DANGER=30;
 
-function renderByOffice(active){
-  return `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-    ${OFFICES.map(o=>{
-      const clients=active.filter(r=>normalizeOffice(r.office)===o);
-      const signed=clients.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("signed")).length;
-      const avgP=clients.length?Math.round(clients.reduce((s,r)=>s+pct(r),0)/clients.length):0;
-      return `<div class="card card-pad">
-        <div style="display:flex;justify-content:space-between;margin-bottom:14px">
-          <div style="font-weight:700;font-size:14px">${o}</div>
-          <span class="office-pill">${clients.length} clients</span>
-        </div>
-        <div class="info-row"><span class="info-label">Fully signed</span><span style="color:#22c55e;font-weight:700">${signed}</span></div>
-        <div class="info-row"><span class="info-label">Avg completion</span><span style="color:#6366f1;font-weight:700">${avgP}%</span></div>
-        <div class="info-row" style="border:none"><span class="info-label">Staff</span><span style="font-size:12px;color:var(--muted)">${[...new Set(clients.map(r=>r.intake_personnel).filter(Boolean))].join(", ")||"--"}</span></div>
-      </div>`;
-    }).join("")}
-  </div>`;
-}
+  const aged = active.map(r=>{
+    const received   = r.referral_received_date||r.date_received||null;
+    const daysTotal  = daysSince(received);
+    const daysStage  = r.current_stage==="Active Client"
+                       ? daysBetween(received, r.active_client_date)
+                       : daysTotal;
+    const daysAwaitPW    = !["signed","completed"].includes((r.intake_paperwork||"").toLowerCase()) ? daysSince(received) : null;
+    const daysAwaitIns   = r.insurance_verified!=="YES" ? daysSince(received) : null;
+    const daysToActive   = r.active_client_date ? daysBetween(received,r.active_client_date) : null;
+    return {...r, received, daysTotal, daysStage, daysAwaitPW, daysAwaitIns, daysToActive};
+  }).filter(r=>r.received);
 
-function renderTrends(active){
-  const byMonth={};
-  active.forEach(r=>{
-    if(!r.date_received) return;
-    const key=r.date_received.slice(0,7);
-    byMonth[key]=(byMonth[key]||0)+1;
-  });
-  const months=Object.keys(byMonth).sort();
-  const items=months.map(m=>{
-    const [y,mo]=m.split("-");
-    const label=new Date(y,parseInt(mo)-1).toLocaleString("default",{month:"short",year:"2-digit"});
-    return {l:label,v:byMonth[m],color:"#6366f1"};
-  });
-  return `<div class="card card-pad"><div class="chart-title">Monthly Intake Trends</div>
-    ${items.length?barChart(items,"#6366f1"):`<div style="color:var(--dim);text-align:center;padding:40px">No date data available.</div>`}
-  </div>`;
-}
+  const stalled    = aged.filter(r=>r.daysTotal>=DANGER);
+  const avgDays    = aged.length ? Math.round(aged.reduce((s,r)=>s+(r.daysTotal||0),0)/aged.length) : 0;
+  const longest    = aged.reduce((max,r)=>(r.daysTotal||0)>(max.daysTotal||0)?r:max, aged[0]||{});
+  const completed  = aged.filter(r=>r.daysToActive!==null);
+  const avgToActive= completed.length ? Math.round(completed.reduce((s,r)=>s+r.daysToActive,0)/completed.length) : null;
 
-function renderInsurance(active){
-  const counts={};
-  active.forEach(r=>{if(r.insurance)counts[r.insurance]=(counts[r.insurance]||0)+1;});
-  const colors=["#6366f1","#22c55e","#f59e0b","#fb923c","#ef4444","#8b5cf6","#06b6d4","#ec4899","#a3e635","#f97316"];
-  const items=Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([l,v],i)=>{return{l,v,color:colors[i%colors.length]}});
-  return `<div class="card card-pad"><div class="chart-title">Insurance Type Breakdown</div>
-    ${barChart(items)}
-    <div style="margin-top:20px;display:flex;flex-wrap:wrap;gap:10px">
-      ${items.map(i=>`<div class="legend-item"><div class="legend-dot" style="background:${i.color}"></div>${i.l} (${i.v})</div>`).join("")}
+  const sorted = [...aged].sort((a,b)=>(b.daysTotal||0)-(a.daysTotal||0));
+
+  return `
+    <div style="margin-bottom:22px">
+      <div style="font-weight:800;font-size:18px;letter-spacing:-0.01em">Referral Aging</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:4px">
+        How long referrals have been in the system.
+        <span style="color:#22c55e">● &lt;${WARN}d</span>
+        <span style="margin-left:8px;color:#f59e0b">● ${WARN}-${DANGER}d</span>
+        <span style="margin-left:8px;color:#ef4444">● ${DANGER}d+</span>
+      </div>
     </div>
-  </div>`;
+
+    <div class="stats-row stats-4" style="margin-bottom:22px">
+      ${statCard(aged.length,"Referrals with Dates","#6366f1","date received on record")}
+      ${statCard(avgDays+"d","Avg. Time in System","#f59e0b","across all active")}
+      ${statCard(stalled.length,"Stalled (30d+)","#ef4444","need immediate attention")}
+      ${statCard(avgToActive!==null?avgToActive+"d":"--","Avg. to Active Client","#22c55e","referral → services")}
+    </div>
+
+    ${aged.length===0?`
+      <div class="card card-pad" style="text-align:center;padding:48px;color:var(--dim)">
+        <div style="font-size:32px;margin-bottom:12px">📅</div>
+        <div style="font-weight:700;margin-bottom:6px">No date data yet</div>
+        <div style="font-size:13px">Add referral_received_date to records to enable aging reports.</div>
+      </div>`:`
+
+    <div class="card" style="margin-bottom:20px">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:13px;font-weight:700">All Active Referrals — Sorted by Age</div>
+        ${longest.first_name?`<div style="font-size:12px;color:var(--muted)">Longest waiting: <strong style="color:#ef4444">${longest.first_name} ${longest.last_name}</strong> (${longest.daysTotal}d)</div>`:""}
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr>
+          <th>Client</th><th>Stage</th><th>Staff</th>
+          <th>Date Received</th><th>Days in System</th>
+          <th>Awaiting Paperwork</th><th>Awaiting Insurance</th>
+          <th>Days to Active</th>
+        </tr></thead>
+        <tbody>
+          ${sorted.map(r=>`
+          <tr class="row-hover" onclick="S.sel='${r.id}';S.editMode=false;go()">
+            <td><div style="font-weight:700">${r.first_name} ${r.last_name}</div><div style="font-size:11px;color:var(--dim)">${r.office||""}</div></td>
+            <td>${r.current_stage?stagePill(r.current_stage):"--"}</td>
+            <td style="font-size:12px;color:var(--muted)">${r.intake_personnel||"--"}</td>
+            <td style="font-family:'DM Mono',monospace;font-size:11px;color:var(--dim)">${r.received||"--"}</td>
+            <td>${ageBadge(r.daysTotal,WARN,DANGER)}</td>
+            <td>${r.daysAwaitPW!==null?ageBadge(r.daysAwaitPW,WARN,DANGER):`<span style="color:#22c55e;font-size:12px">✓ Done</span>`}</td>
+            <td>${r.daysAwaitIns!==null?ageBadge(r.daysAwaitIns,WARN,DANGER):`<span style="color:#22c55e;font-size:12px">✓ Done</span>`}</td>
+            <td>${r.daysToActive!==null?`<span style="color:#22c55e;font-family:'DM Mono',monospace;font-size:12px">${r.daysToActive}d</span>`:`<span style="color:var(--dim);font-size:12px">--</span>`}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table></div>
+    </div>`}`;
+}
+
+// ══════════════════════════════════════
+// CLINIC REFERRAL VOLUME
+// ══════════════════════════════════════
+function renderClinicVolume(active,nr){
+  const all     = [...active,...nr];
+  const offices = ["MERIDIAN","FOREST","FLOWOOD","DAY TREATMENT"];
+  const COLORS  = {"MERIDIAN":"#6366f1","FOREST":"#22c55e","FLOWOOD":"#f59e0b","DAY TREATMENT":"#fb923c"};
+
+  const stats = offices.map(o=>({
+    office:   o,
+    color:    COLORS[o]||"#64748b",
+    total:    all.filter(r=>normalizeOffice(r.office)===o).length,
+    open:     active.filter(r=>normalizeOffice(r.office)===o).length,
+    nr:       nr.filter(r=>normalizeOffice(r.office)===o).length,
+    signed:   active.filter(r=>normalizeOffice(r.office)===o&&(r.intake_paperwork||"").toLowerCase().includes("signed")).length,
+    verified: active.filter(r=>normalizeOffice(r.office)===o&&r.insurance_verified==="YES").length,
+  })).filter(s=>s.total>0).sort((a,b)=>b.total-a.total);
+
+  const maxTotal   = Math.max(...stats.map(s=>s.total),1);
+  const topClinic  = stats[0];
+
+  // Per-clinic monthly breakdown — last 6 months
+  const months={};
+  all.forEach(r=>{
+    const d=r.date_received||r.referral_received_date;
+    if(!d) return;
+    const key=d.slice(0,7);
+    if(!months[key]) months[key]={};
+    const o=normalizeOffice(r.office)||"Other";
+    months[key][o]=(months[key][o]||0)+1;
+  });
+  const monthKeys=Object.keys(months).sort().slice(-6);
+
+  return `
+    <div style="margin-bottom:22px">
+      <div style="font-weight:800;font-size:18px;letter-spacing:-0.01em">Clinic Referral Volume</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:4px">Referral counts, open intake volume, and monthly trends by clinic</div>
+    </div>
+
+    ${topClinic?`
+    <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:12px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <div>
+        <div style="font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px">Highest Volume Clinic</div>
+        <div style="font-size:20px;font-weight:800;color:${topClinic.color}">${topClinic.office}</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:2px">${topClinic.total} total referrals &nbsp;·&nbsp; ${topClinic.open} currently open</div>
+      </div>
+      <div style="display:flex;gap:20px">
+        <div style="text-align:center">
+          <div style="font-size:22px;font-weight:800;color:#22c55e;font-family:'DM Mono',monospace">${topClinic.signed}</div>
+          <div style="font-size:11px;color:var(--dim)">Signed</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:22px;font-weight:800;color:#a5b4fc;font-family:'DM Mono',monospace">${topClinic.verified}</div>
+          <div style="font-size:11px;color:var(--dim)">Ins. Verified</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:22px;font-weight:800;color:#ef4444;font-family:'DM Mono',monospace">${topClinic.nr}</div>
+          <div style="font-size:11px;color:var(--dim)">Non-Responsive</div>
+        </div>
+      </div>
+    </div>`:""}
+
+    <div style="display:grid;grid-template-columns:repeat(${stats.length},1fr);gap:14px;margin-bottom:24px">
+      ${stats.map((s,i)=>`
+        <div class="stat-box" style="border-color:${s.color}30${i===0?"":""};${i===0?`border-top:3px solid ${s.color}`:""}">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+            <div class="stat-num" style="color:${s.color}">${s.total}</div>
+            ${i===0?`<span style="font-size:9px;font-weight:700;color:${s.color};background:${s.color}18;border:1px solid ${s.color}30;border-radius:4px;padding:2px 6px">TOP</span>`:""}
+          </div>
+          <div class="stat-label">${s.office}</div>
+          <div class="stat-sub">${s.open} open &nbsp;·&nbsp; ${s.nr} NR</div>
+        </div>`).join("")}
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px">
+      <div class="card card-pad">
+        <div style="font-size:13px;font-weight:700;margin-bottom:16px">📊 Open Referrals by Clinic</div>
+        ${stats.map(s=>`
+          <div style="margin-bottom:16px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+              <span style="font-weight:700;font-size:13px;color:${s.color}">${s.office}</span>
+              <span style="font-size:11px;color:var(--dim)">${s.open} open of ${s.total} total</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:5px">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:11px;color:var(--muted);width:90px;flex-shrink:0">Open Referrals</span>
+                ${miniBar(s.open,maxTotal,s.color)}
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:11px;color:var(--muted);width:90px;flex-shrink:0">Paperwork Signed</span>
+                ${miniBar(s.signed,maxTotal,"#22c55e")}
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:11px;color:var(--muted);width:90px;flex-shrink:0">Ins. Verified</span>
+                ${miniBar(s.verified,maxTotal,"#a5b4fc")}
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:11px;color:var(--muted);width:90px;flex-shrink:0">Non-Responsive</span>
+                ${miniBar(s.nr,maxTotal,"#ef4444")}
+              </div>
+            </div>
+          </div>`).join("")}
+      </div>
+
+      <div class="card card-pad">
+        <div style="font-size:13px;font-weight:700;margin-bottom:16px">📅 Monthly Volume by Clinic</div>
+        ${monthKeys.length===0
+          ?`<div style="color:var(--dim);font-size:13px;text-align:center;padding:20px">No date data yet -- add referral_received_date to records.</div>`
+          :`<div>
+            <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+              ${offices.filter(o=>stats.find(s=>s.office===o)).map(o=>`
+                <span style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)">
+                  <span style="width:8px;height:8px;border-radius:2px;background:${COLORS[o]};display:inline-block"></span>${o}
+                </span>`).join("")}
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <thead>
+                <tr>
+                  <th style="text-align:left;padding:6px 8px;color:var(--dim);font-size:10px;border-bottom:1px solid var(--border)">Month</th>
+                  ${offices.filter(o=>stats.find(s=>s.office===o)).map(o=>`
+                    <th style="text-align:center;padding:6px 8px;color:${COLORS[o]};font-size:10px;border-bottom:1px solid var(--border)">${o.split(" ")[0]}</th>`).join("")}
+                  <th style="text-align:center;padding:6px 8px;color:var(--dim);font-size:10px;border-bottom:1px solid var(--border)">TOTAL</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${monthKeys.map(m=>{
+                  const [y,mo]=m.split("-");
+                  const label=new Date(parseInt(y),parseInt(mo)-1).toLocaleString("default",{month:"short",year:"2-digit"});
+                  const rowTotal=Object.values(months[m]).reduce((s,v)=>s+v,0);
+                  return `<tr style="border-bottom:1px solid #0a1525">
+                    <td style="padding:7px 8px;color:var(--muted);font-family:'DM Mono',monospace">${label}</td>
+                    ${offices.filter(o=>stats.find(s=>s.office===o)).map(o=>`
+                      <td style="text-align:center;padding:7px 8px;font-weight:${months[m][o]?"600":"400"};color:${months[m][o]?COLORS[o]:"var(--dim)"}">
+                        ${months[m][o]||"--"}
+                      </td>`).join("")}
+                    <td style="text-align:center;padding:7px 8px;font-weight:700;color:var(--text);font-family:'DM Mono',monospace">${rowTotal}</td>
+                  </tr>`;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>`}
+      </div>
+    </div>`;
+}
+
+
+
+// ══════════════════════════════════════
+// CONVERSION RATE
+// ══════════════════════════════════════
+function renderConversionRate(active,nr){
+  const all    = [...active,...nr];
+  const total  = all.length;
+
+  // Funnel counts — each step is a subset of the previous
+  const step_referral    = total;
+  const step_paperwork   = active.filter(r=>["signed","completed"].some(v=>(r.intake_paperwork||"").toLowerCase().includes(v))).length;
+  const step_insurance   = active.filter(r=>(r.insurance_verified||"").toUpperCase()==="YES").length;
+  const step_interview   = active.filter(r=>{
+    // Use parent_interview_status from assessments if available, else permission_assessment
+    const pi = (r.permission_assessment||"").toLowerCase();
+    return pi.includes("completed")||pi.includes("yes")||pi==="done";
+  }).length;
+  const step_assessment  = active.filter(r=>(r.autism_diagnosis||"").toLowerCase().includes("received")).length;
+  const step_active      = active.filter(r=>r.current_stage==="Active Client").length;
+
+  const FUNNEL = [
+    {label:"Referral Received",        count:step_referral,   color:"#6366f1"},
+    {label:"Paperwork Completed",       count:step_paperwork,  color:"#8b5cf6"},
+    {label:"Insurance Verified",        count:step_insurance,  color:"#f59e0b"},
+    {label:"Parent Interview Completed",count:step_interview,  color:"#fb923c"},
+    {label:"Assessment Completed",      count:step_assessment, color:"#fb923c"},
+    {label:"Active Client",             count:step_active,     color:"#22c55e"},
+  ];
+
+  // Find biggest drop-off
+  let maxDrop=-1, maxDropIdx=0;
+  FUNNEL.forEach((step,i)=>{
+    if(i===0) return;
+    const drop=FUNNEL[i-1].count-step.count;
+    if(drop>maxDrop){ maxDrop=drop; maxDropIdx=i; }
+  });
+  const biggestDrop    = FUNNEL[maxDropIdx];
+  const biggestDropPrev= FUNNEL[maxDropIdx-1];
+  const biggestDropPct = biggestDropPrev.count>0?Math.round(maxDrop/biggestDropPrev.count*100):0;
+
+  const convRate   = total>0?Math.round(step_active/total*100):0;
+  const paRate     = total>0?Math.round(active.filter(r=>["PA Approved","Active Client"].includes(r.current_stage)).length/total*100):0;
+  const dropRate   = total>0?Math.round(nr.length/total*100):0;
+
+  return `
+    <div style="margin-bottom:22px">
+      <div style="font-weight:800;font-size:18px;letter-spacing:-0.01em">Conversion Rate</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:4px">Where families enter the pipeline -- and where they are lost</div>
+    </div>
+
+    <div class="stats-row stats-3" style="margin-bottom:20px">
+      ${statCard(total,"Total Referrals","#6366f1","all time")}
+      ${statCard(step_active,"Active Clients","#22c55e","receiving services")}
+      ${statCard(convRate+"%","Referral -- Active Rate","#f59e0b",step_active+" of "+total+" referrals")}
+    </div>
+
+    ${maxDrop>0?`
+    <div style="background:#ef444412;border:1px solid #ef444430;border-radius:12px;padding:16px 20px;margin-bottom:22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <span style="font-size:22px">⚠️</span>
+      <div>
+        <div style="font-size:13px;font-weight:700;color:#ef4444;margin-bottom:3px">Biggest Drop-Off Point</div>
+        <div style="font-size:13px;color:var(--muted)">
+          <strong style="color:var(--text)">${biggestDropPct}% of families</strong> are lost between
+          <strong style="color:var(--text)">${biggestDropPrev.label}</strong> and
+          <strong style="color:var(--text)">${biggestDrop.label}</strong>
+          &nbsp;--&nbsp; ${maxDrop} referral${maxDrop!==1?"s":""} did not advance.
+        </div>
+      </div>
+    </div>`:""}
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div class="card card-pad">
+        <div style="font-size:13px;font-weight:700;margin-bottom:20px">🔽 Intake Funnel</div>
+        ${FUNNEL.map((step,i)=>{
+          const pct         = total>0?Math.round(step.count/total*100):0;
+          const prevCount   = i>0?FUNNEL[i-1].count:step.count;
+          const dropOff     = i>0?prevCount-step.count:0;
+          const dropOffPct  = prevCount>0?Math.round(dropOff/prevCount*100):0;
+          const isBiggest   = i===maxDropIdx && dropOff>0;
+          return `<div style="margin-bottom:18px${isBiggest?";border-left:3px solid #ef4444;padding-left:12px;margin-left:-12px":""}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <span style="font-size:12px;font-weight:600;color:${isBiggest?"#ef4444":"var(--text)"}">${step.label}</span>
+              <div style="display:flex;align-items:center;gap:8px">
+                ${dropOff>0?`<span style="font-size:10px;color:#ef4444;font-weight:600">-${dropOff} (${dropOffPct}%)</span>`:""}
+                <span style="font-size:13px;font-weight:800;color:${step.color};font-family:'DM Mono',monospace">${step.count}</span>
+              </div>
+            </div>
+            <div style="background:var(--surface2);border-radius:4px;height:12px">
+              <div style="width:${pct}%;height:12px;border-radius:4px;background:${step.color};transition:width 0.6s"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-top:3px">
+              <span style="font-size:10px;color:var(--dim)">${pct}% of all referrals</span>
+              ${i<FUNNEL.length-1?`<span style="font-size:10px;color:var(--dim)">${FUNNEL[i+1]?Math.round(FUNNEL[i+1].count/(step.count||1)*100):0}% advance</span>`:""}
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div class="card card-pad">
+          <div style="font-size:13px;font-weight:700;margin-bottom:14px">📉 Step-by-Step Drop-Off</div>
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th style="text-align:left;padding:6px 0;color:var(--dim);font-size:10px">Step</th>
+                <th style="text-align:center;padding:6px 0;color:var(--dim);font-size:10px">Count</th>
+                <th style="text-align:center;padding:6px 0;color:var(--dim);font-size:10px">Lost</th>
+                <th style="text-align:center;padding:6px 0;color:var(--dim);font-size:10px">% Lost</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${FUNNEL.map((step,i)=>{
+                const prev      = i>0?FUNNEL[i-1].count:step.count;
+                const lost      = i>0?prev-step.count:0;
+                const lostPct   = prev>0&&i>0?Math.round(lost/prev*100):0;
+                const isBig     = i===maxDropIdx && lost>0;
+                return `<tr style="border-bottom:1px solid #0a1525;background:${isBig?"#ef444408":"transparent"}">
+                  <td style="padding:7px 0;color:${isBig?"#ef4444":"var(--muted)"};font-size:11px">${step.label.split(" ").slice(0,2).join(" ")}</td>
+                  <td style="text-align:center;padding:7px 0;font-weight:700;color:${step.color};font-family:'DM Mono',monospace">${step.count}</td>
+                  <td style="text-align:center;padding:7px 0;color:${lost>0?"#ef4444":"var(--dim)"};font-family:'DM Mono',monospace">${lost>0?"-"+lost:"--"}</td>
+                  <td style="text-align:center;padding:7px 0;color:${isBig?"#ef4444":lostPct>20?"#f59e0b":"var(--dim)"};font-weight:${isBig?"700":"400"}">${lostPct>0?lostPct+"%":"--"}</td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card card-pad">
+          <div style="font-size:13px;font-weight:700;margin-bottom:14px">📋 Other Metrics</div>
+          <div class="info-row"><span class="info-label">PA Approval Rate</span><span style="color:#22c55e;font-weight:700">${paRate}%</span></div>
+          <div class="info-row"><span class="info-label">Non-Responsive Rate</span><span style="color:#ef4444;font-weight:700">${dropRate}%</span></div>
+          <div class="info-row"><span class="info-label">Non-Responsive Count</span><span style="color:#ef4444;font-weight:700">${nr.length}</span></div>
+          <div class="info-row" style="border:none"><span class="info-label">Referred Out</span><span style="color:#8b5cf6;font-weight:700">${nr.filter(r=>r.status==="referred-out").length}</span></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+
+
+// ══════════════════════════════════════
+// INTAKE PERFORMANCE
+// ══════════════════════════════════════
+function renderIntakePerformance(active){
+  const STAFF_LIST = [...new Set(active.map(r=>r.intake_personnel).filter(Boolean))].sort();
+
+  const perf = STAFF_LIST.map(staff=>{
+    const mine    = active.filter(r=>r.intake_personnel===staff);
+    const signed  = mine.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("signed")).length;
+    const verified= mine.filter(r=>r.insurance_verified==="YES").length;
+    const dxRecvd = mine.filter(r=>(r.autism_diagnosis||"").toLowerCase().includes("received")).length;
+    const active_ = mine.filter(r=>r.current_stage==="Active Client").length;
+    const pending = mine.filter(r=>!["signed","completed"].includes((r.intake_paperwork||"").toLowerCase())).length;
+    const score   = mine.length>0?Math.round(((signed+verified+dxRecvd)/((mine.length*3)||1))*100):0;
+    return {staff,total:mine.length,signed,verified,dxRecvd,active:active_,pending,score};
+  });
+
+  const totalActive  = active.length;
+  const totalSigned  = active.filter(r=>(r.intake_paperwork||"").toLowerCase().includes("signed")).length;
+  const totalVerified= active.filter(r=>r.insurance_verified==="YES").length;
+  const overallScore = totalActive>0?Math.round(((totalSigned+totalVerified)/(totalActive*2))*100):0;
+
+  // Monthly trend
+  const months={};
+  active.forEach(r=>{
+    const d=r.date_received||r.referral_received_date;
+    if(!d) return;
+    const key=d.slice(0,7);
+    months[key]=(months[key]||0)+1;
+  });
+  const monthKeys=Object.keys(months).sort().slice(-6);
+
+  return `
+    <div style="margin-bottom:22px">
+      <div style="font-weight:800;font-size:18px;letter-spacing:-0.01em">Intake Performance</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:4px">Staff productivity, completion rates, and monthly intake trends</div>
+    </div>
+
+    <div class="stats-row stats-4" style="margin-bottom:24px">
+      ${statCard(totalActive,"Total Active","#6366f1")}
+      ${statCard(totalSigned,"Paperwork Signed","#22c55e",Math.round(totalSigned/totalActive*100||0)+"% completion")}
+      ${statCard(totalVerified,"Insurance Verified","#f59e0b",Math.round(totalVerified/totalActive*100||0)+"% completion")}
+      ${statCard(overallScore+"%","Overall Score","#8b5cf6","signed + verified")}
+    </div>
+
+    <div style="margin-bottom:20px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:14px">👤 Staff Performance</div>
+      <div class="card"><div class="table-wrap"><table>
+        <thead><tr>
+          <th>Staff Member</th><th>Assigned</th><th>Paperwork Signed</th>
+          <th>Insurance Verified</th><th>Dx Received</th>
+          <th>Active Clients</th><th>Pending Docs</th><th>Score</th>
+        </tr></thead>
+        <tbody>
+          ${perf.sort((a,b)=>b.score-a.score).map(p=>{
+            const scoreColor=p.score>=80?"#22c55e":p.score>=50?"#f59e0b":"#ef4444";
+            return `<tr>
+              <td style="font-weight:700">${p.staff}</td>
+              <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted)">${p.total}</td>
+              <td>${miniBar(p.signed,p.total,"#22c55e")}</td>
+              <td>${miniBar(p.verified,p.total,"#f59e0b")}</td>
+              <td>${miniBar(p.dxRecvd,p.total,"#a5b4fc")}</td>
+              <td style="font-family:'DM Mono',monospace;font-size:12px;color:#22c55e">${p.active}</td>
+              <td>${p.pending>0?`<span class="bdg" style="background:#f59e0b20;color:#f59e0b;border:1px solid #f59e0b30">${p.pending}</span>`:`<span style="color:#22c55e;font-size:12px">✓</span>`}</td>
+              <td><span style="font-size:14px;font-weight:800;color:${scoreColor};font-family:'DM Mono',monospace">${p.score}%</span></td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table></div></div>
+    </div>
+
+    <div class="card card-pad">
+      <div style="font-size:13px;font-weight:700;margin-bottom:14px">📅 Monthly Intake Trend</div>
+      ${monthKeys.length===0
+        ?`<div style="color:var(--dim);font-size:13px;text-align:center;padding:20px">No date data available yet.</div>`
+        :`<div style="display:flex;align-items:flex-end;gap:8px;height:80px;padding-top:8px">
+          ${(()=>{
+            const maxM=Math.max(...monthKeys.map(m=>months[m]),1);
+            return monthKeys.map(m=>{
+              const [y,mo]=m.split("-");
+              const label=new Date(parseInt(y),parseInt(mo)-1).toLocaleString("default",{month:"short"});
+              const h=Math.round(months[m]/maxM*70);
+              return `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1">
+                <span style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${months[m]}</span>
+                <div style="width:100%;height:${h}px;background:#6366f1;border-radius:4px 4px 0 0;min-height:4px;transition:height 0.5s"></div>
+                <span style="font-size:10px;color:var(--dim)">${label}</span>
+              </div>`;
+            }).join("");
+          })()}
+        </div>`}
+    </div>`;
 }
 
 // ══════════════════════════════════════
 // ABOUT
 // ══════════════════════════════════════
+// ══════════════════════════════════════
+// ABOUT — About the Portal
+// ══════════════════════════════════════
+function renderAboutPortal(){
+  return `
+    <div style="max-width:680px;margin:0 auto">
+
+      <div style="display:flex;align-items:center;gap:18px;margin-bottom:36px">
+        <div style="width:64px;height:64px;border-radius:16px;overflow:hidden;background:white;flex-shrink:0;box-shadow:0 4px 20px rgba(0,0,0,0.3)">
+          <img src="${LOGO_SRC}" alt="BSOM" style="width:64px;height:64px;object-fit:contain">
+        </div>
+        <div>
+          <div style="font-weight:800;font-size:22px;letter-spacing:-0.02em;color:var(--text)">BSOM Intake Portal</div>
+          <div style="font-size:13px;color:var(--dim);margin-top:3px">Behavioral Solutions of Mississippi</div>
+        </div>
+      </div>
+
+      <div style="border-left:3px solid var(--accent);padding-left:20px;margin-bottom:32px">
+        <p style="font-size:15px;line-height:1.8;color:var(--muted)">
+          The BSOM Portal was developed internally to streamline referral intake, assessment tracking,
+          and operational visibility across Behavioral Solutions of Mississippi.
+        </p>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:20px;margin-bottom:40px">
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:22px 24px">
+          <div style="font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px">Purpose</div>
+          <p style="font-size:14px;line-height:1.75;color:var(--muted)">
+            This platform was created to support collaboration between intake staff, clinical teams,
+            and leadership by improving visibility across the referral and assessment pipeline.
+            It centralizes client records, tracks milestone progress, and provides operational
+            reporting to support informed decision-making at every level of the organization.
+          </p>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:22px 24px">
+          <div style="font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px">What This Portal Supports</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px">
+            ${[
+              ["📋","Referral Intake","Centralized tracking of all incoming referrals"],
+              ["🧪","Initial Assessments","Vineland, SRS-2, observations, and PA tracking"],
+              ["📊","Operational Insights","Aging reports, volume, conversion, and performance"],
+              ["👩‍⚕️","BCBA Coordination","Assignment tracking and caseload visibility"],
+              ["🛡️","Insurance Verification","Status tracking across all active referrals"],
+              ["⭐","Client Readiness","Clear visibility into who is ready for services"],
+            ].map(([icon,title,desc])=>`
+              <div style="display:flex;gap:12px;padding:12px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)">
+                <span style="font-size:18px;flex-shrink:0">${icon}</span>
+                <div>
+                  <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:3px">${title}</div>
+                  <div style="font-size:12px;color:var(--dim);line-height:1.5">${desc}</div>
+                </div>
+              </div>`).join("")}
+          </div>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:22px 24px">
+          <div style="font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:10px">Development Status</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <span style="display:inline-flex;align-items:center;gap:6px;background:#22c55e18;color:#22c55e;border:1px solid #22c55e30;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:700">
+              <span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block"></span>
+              Active Development
+            </span>
+          </div>
+          <p style="font-size:14px;line-height:1.75;color:var(--muted)">
+            This portal is currently in active development and may continue to receive updates
+            and enhancements over time as the needs of the organization evolve.
+          </p>
+        </div>
+
+      </div>
+
+      <div style="border-top:1px solid var(--border);padding-top:24px;text-align:center">
+        <div style="font-size:13px;color:var(--dim);margin-bottom:4px">Prepared and developed by</div>
+        <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:16px">Zanteria Wells</div>
+        <div style="font-size:12px;color:var(--dim)">© 2026 Behavioral Solutions of Mississippi</div>
+      </div>
+
+    </div>`;
+}
+
 function renderLocations(){
   const offices=[
     {name:"Meridian",addr:"Meridian, MS",phone:"601-000-0000",type:"Main Office"},
